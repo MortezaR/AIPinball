@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: pinball_gym_env
+Version: 0.1.0
+Summary: A custom OpenAI Gym environment that plays pinball using Visual Pinball
+Author: MortezaR
+Requires-Dist: gymnasium>=0.29.0
+Requires-Dist: numpy>=1.22.0
+Dynamic: author
+Dynamic: requires-dist
+Dynamic: summary

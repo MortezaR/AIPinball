@@ -1,9 +1,0 @@
-setup.py
-pinball_gym_env/__init__.py
-pinball_gym_env/pinball_env.py
-pinball_gym_env.egg-info/PKG-INFO
-pinball_gym_env.egg-info/SOURCES.txt
-pinball_gym_env.egg-info/dependency_links.txt
-pinball_gym_env.egg-info/entry_points.txt
-pinball_gym_env.egg-info/requires.txt
-pinball_gym_env.egg-info/top_level.txt

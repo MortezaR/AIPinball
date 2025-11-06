@@ -1,2 +1,0 @@
-[gymnasium.envs]
-PinballEnv-v0 = pinball_env.pinball_env:PinballEnv

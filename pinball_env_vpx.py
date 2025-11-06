@@ -1,6 +1,6 @@
 
 import time
-from typing import Optional, Sequence, Tuple, Dict, Any
+from typing import Optional, Sequence, Tuple, Dict, Any, List
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
@@ -8,9 +8,9 @@ import requests
 
 class PinballEnv(gym.Env):
     """
-    VPX-backed Gymnasium env.
-    Expects a local "bridge" HTTP server that VPX posts state to and that
-    returns actions in response (see vpx_bridge.py).
+    VPX-backed Gymnasium env (robust key handling).
+    - Accepts multiple possible raw key names from VPX and computes fallbacks.
+    - Prints a one-time warning listing which keys were missing & how they were resolved.
     """
     metadata = {"render_modes": ["human", "rgb_array", None], "render_fps": 60}
 
@@ -31,7 +31,9 @@ class PinballEnv(gym.Env):
         seed: Optional[int] = None,
         feature_bounds: Optional[Dict[str, Tuple[float, float]]] = None,
         reset_timeout_s: float = 6.0,
-        step_wait_s: float = 0.0,   # extra wait after sending action (in addition to frame_skip*dt)
+        step_wait_s: float = 0.0,
+        feature_aliases: Optional[Dict[str, List[str]]] = None,
+        verbose_missing_once: bool = True,
     ) -> None:
         super().__init__()
         self.server_url = server_url.rstrip("/")
@@ -68,10 +70,27 @@ class PinballEnv(gym.Env):
             self.action_space = spaces.Box(low=low, high=high, dtype=np.float32)
             self._action_desc = ("left_force", "right_force", "nudge_impulse")
 
+        # alias map for flexible input keys
+        default_aliases = {
+            "ball_x": ["ball_x", "x", "X", "BallX"],
+            "ball_y": ["ball_y", "y", "Y", "BallY"],
+            "ball_vx": ["ball_vx", "vx", "VelX", "ball_vel_x"],
+            "ball_vy": ["ball_vy", "vy", "VelY", "ball_vel_y"],
+            "ball_speed": ["ball_speed", "speed", "Speed"],
+            "on_playfield": ["on_playfield", "in_play", "onpf", "OnPlayfield"],
+            "score": ["score", "Score", "POINTS"],
+            "tilt_warning": ["tilt_warning", "tilt", "TiltWarning", "Tilt"],
+        }
+        if feature_aliases:
+            for k, v in feature_aliases.items():
+                default_aliases[k] = v + default_aliases.get(k, [])
+        self.feature_aliases = default_aliases
+
         self._episode_steps = 0
         self._last_obs: Optional[np.ndarray] = None
         self._last_score: float = 0.0
         self._done = False
+        self._warn_once_done = not verbose_missing_once
 
     # -------------------- bounds + normalization --------------------
     def _default_feature_bounds(self, w: float, h: float, dt: float) -> Dict[str, Tuple[float, float]]:
@@ -101,10 +120,60 @@ class PinballEnv(gym.Env):
         x = np.clip(x, 0.0, 1.0)
         return float(x * 2.0 - 1.0)
 
-    def pack_observation(self, raw: Dict[str, float]) -> np.ndarray:
+    # Resolve a raw numeric value for a logical feature name.
+    def _resolve_raw(self, raw: Dict[str, Any], name: str) -> float:
+        # direct/alias lookups
+        for k in self.feature_aliases.get(name, [name]):
+            if k in raw:
+                try:
+                    return float(raw[k])
+                except Exception:
+                    pass
+        # fallbacks
+        if name == "ball_speed":
+            vx = self._resolve_raw(raw, "ball_vx")
+            vy = self._resolve_raw(raw, "ball_vy")
+            return float(np.hypot(vx, vy))
+        if name == "on_playfield":
+            # if we can read Y within table, assume in play
+            y = None
+            for k in self.feature_aliases.get("ball_y", ["ball_y"]):
+                if k in raw:
+                    try:
+                        y = float(raw[k])
+                        break
+                    except Exception:
+                        pass
+            if y is not None and (0.0 <= y <= self.table_h * 1.2):
+                return 1.0
+            return 0.0
+        if name == "tilt_warning":
+            return 0.0
+        if name == "score":
+            return 0.0
+        if name in ("ball_x", "ball_y", "ball_vx", "ball_vy"):
+            return 0.0
+        raise KeyError(name)
+
+    def pack_observation(self, raw: Dict[str, Any]) -> np.ndarray:
         obs = np.empty((len(self.obs_features),), dtype=np.float32)
+        missing = []
+        resolved = {}
         for i, name in enumerate(self.obs_features):
-            obs[i] = self.normalize_feature(name, raw[name])
+            try:
+                val = self._resolve_raw(raw, name)
+                resolved[name] = val
+                obs[i] = self.normalize_feature(name, val)
+            except Exception:
+                missing.append(name)
+                obs[i] = 0.0
+        if missing and not self._warn_once_done:
+            self._warn_once_done = True
+            have = ", ".join(sorted(raw.keys()))
+            need = ", ".join(self.obs_features)
+            miss = ", ".join(missing)
+            print(f"[PinballEnv] Warning: missing features: {miss}. Raw keys present: {have}. "
+                  f"Using fallbacks/zeros where possible.")
         return obs
 
     # -------------------- HTTP helpers --------------------
@@ -124,11 +193,10 @@ class PinballEnv(gym.Env):
         self._episode_steps = 0
         self._done = False
         self._last_score = 0.0
+        self._warn_once_done = False
 
-        # Tell bridge to start a new ball/game
         self._post("/control", {"cmd": "new_ball"})
 
-        # Wait for VPX to report a valid state
         t0 = time.time()
         raw = None
         while time.time() - t0 < self.reset_timeout_s:
@@ -136,9 +204,7 @@ class PinballEnv(gym.Env):
                 state = self._get("/last_state")
                 if state and "raw" in state:
                     raw = state["raw"]
-                    # Require at least these fields
-                    if all(k in raw for k in self.obs_features):
-                        break
+                    break
             except Exception:
                 pass
             time.sleep(0.02)
@@ -148,7 +214,7 @@ class PinballEnv(gym.Env):
 
         obs = self.pack_observation(raw)
         self._last_obs = obs
-        self._last_score = float(raw.get("score", 0.0))
+        self._last_score = float(self._resolve_raw(raw, "score"))
         info = {"raw": raw}
         return obs, info
 
@@ -156,11 +222,8 @@ class PinballEnv(gym.Env):
         if self._done:
             raise RuntimeError("Call reset() before step() after episode end.")
 
-        action_payload = self._encode_action(action)
-        # Send the action that VPX should apply for the next tick(s)
-        self._post("/act", action_payload)
+        self._post("/act", self._encode_action(action))
 
-        # Wait for new state after frame_skip * dt
         time.sleep(max(0.0, self.frame_skip * self.dt + self.step_wait_s))
         state = self._get("/last_state")
         if not state or "raw" not in state:
@@ -168,15 +231,13 @@ class PinballEnv(gym.Env):
         raw = state["raw"]
 
         obs = self.pack_observation(raw)
-        score = float(raw.get("score", 0.0))
-        reward = score - self._last_score  # dense reward = score delta
+        score = float(self._resolve_raw(raw, "score"))
+        reward = score - self._last_score
         self._last_score = score
 
-        on_pf = int(raw.get("on_playfield", 1))  # 1 if ball in play; 0 if drained
-        tilt_warn = int(raw.get("tilt_warning", 0))
-
-        terminated = (on_pf == 0)  # ball drained
-        truncated = False          # you can set a max step cutoff if desired
+        on_pf = int(round(self._resolve_raw(raw, "on_playfield")))
+        terminated = (on_pf == 0)
+        truncated = False
 
         self._episode_steps += 1
         self._done = terminated or truncated
@@ -187,7 +248,6 @@ class PinballEnv(gym.Env):
     # -------------------- action encoding --------------------
     def _encode_action(self, action):
         if self.action_schema == "binary_flippers":
-            # Expect MultiBinary(3): [L, R, nudge]
             a = np.asarray(action, dtype=np.int32).clip(0, 1)
             left, right, nudge = int(a[0]), int(a[1]), int(a[2])
             now = time.time()
@@ -211,7 +271,6 @@ class PinballEnv(gym.Env):
     def render(self):
         if self.render_mode is None:
             return None
-        # Hand rendering to VPX window; optionally grab a screen capture here.
         return None
 
     def close(self):

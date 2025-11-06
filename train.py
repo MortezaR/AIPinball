@@ -1,23 +1,11 @@
-# train.py
-from gymnasium.envs.registration import register
 import gymnasium as gym
-import pinball_env
+import pinball_env_vpx as pe
 
-# register environment
-register(
-    id="PinballEnv-v0",
-    entry_point="pinball_env:PinballEnv"
-)
-
-# create environment
-env = gym.make("PinballEnv-v0")
-
-# simple training loop
+env = pe.PinballEnv(server_url="http://127.0.0.1:5000", action_schema="binary_flippers", frame_skip=2, dt=1/60)
 obs, info = env.reset()
-for _ in range(1000):
-    action = env.action_space.sample()
-    obs, reward, terminated, truncated, info = env.step(action)
-    if terminated or truncated:
-        obs, info = env.reset()
-
+for _ in range(200):
+    a = env.action_space.sample()
+    obs, r, term, trunc, info = env.step(a)
+    if term or trunc:
+        break
 env.close()

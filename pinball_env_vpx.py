@@ -5,7 +5,12 @@ import gymnasium as gym
 from gymnasium import spaces
 import requests
 
+
 class PinballEnv(gym.Env):
+    """
+    VPX-backed Gymnasium env (robust key handling).
+    - Now includes binary plunger support.
+    """
     metadata = {"render_modes": ["human", "rgb_array", None], "render_fps": 60}
 
     def __init__(
@@ -55,9 +60,9 @@ class PinballEnv(gym.Env):
 
         self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(len(self.obs_features),), dtype=np.float32)
 
-        # 🔹 Add binary plunger
+        # 🟩 Modified: Include binary plunger
         if self.action_schema == "binary_flippers":
-            self.action_space = spaces.MultiBinary(4)  # [L, R, Nudge, Plunger]
+            self.action_space = spaces.MultiBinary(4)  # [L, R, nudge, plunger]
             self._action_desc = ("left_flipper", "right_flipper", "nudge", "plunger")
         else:
             low = np.array([0.0, 0.0, -1.0, 0.0], dtype=np.float32)
@@ -65,7 +70,6 @@ class PinballEnv(gym.Env):
             self.action_space = spaces.Box(low=low, high=high, dtype=np.float32)
             self._action_desc = ("left_force", "right_force", "nudge_impulse", "plunger_force")
 
-        # alias map for flexible input keys
         default_aliases = {
             "ball_x": ["ball_x", "x", "X", "BallX"],
             "ball_y": ["ball_y", "y", "Y", "BallY"],
@@ -87,7 +91,7 @@ class PinballEnv(gym.Env):
         self._done = False
         self._warn_once_done = not verbose_missing_once
 
-    # -------------------- unchanged helper methods --------------------
+    # -------------------- feature helpers --------------------
     def _default_feature_bounds(self, w: float, h: float, dt: float) -> Dict[str, Tuple[float, float]]:
         vmax = max(w, h) / dt
         return {
@@ -101,52 +105,165 @@ class PinballEnv(gym.Env):
             "tilt_warning": (0.0, 1.0),
         }
 
-    def _validate_feature_bounds(self, features: Sequence[str], bounds: Dict[str, Tuple[float, float]]) -> None:
+    def _validate_feature_bounds(self, features, bounds):
         for f in features:
             if f not in bounds:
                 raise KeyError(f"feature_bounds missing entry for '{f}'.")
             lo, hi = bounds[f]
             if not (np.isfinite(lo) and np.isfinite(hi) and hi > lo):
-                raise ValueError(f"feature_bounds[{f}] must be finite with hi > lo (got {lo}, {hi}).")
+                raise ValueError(f"feature_bounds[{f}] invalid range: ({lo}, {hi})")
 
     def normalize_feature(self, name: str, value: float) -> float:
         lo, hi = self.feature_bounds[name]
         x = (value - lo) / (hi - lo)
-        x = np.clip(x, 0.0, 1.0)
-        return float(x * 2.0 - 1.0)
+        return float(np.clip(x, 0.0, 1.0) * 2.0 - 1.0)
+
+    # -------------------- raw key resolution --------------------
+    def _resolve_raw(self, raw: Dict[str, Any], name: str) -> float:
+        for k in self.feature_aliases.get(name, [name]):
+            if k in raw:
+                try:
+                    return float(raw[k])
+                except Exception:
+                    pass
+        if name == "ball_speed":
+            vx = self._resolve_raw(raw, "ball_vx")
+            vy = self._resolve_raw(raw, "ball_vy")
+            return float(np.hypot(vx, vy))
+        if name == "on_playfield":
+            y = None
+            for k in self.feature_aliases.get("ball_y", ["ball_y"]):
+                if k in raw:
+                    try:
+                        y = float(raw[k])
+                        break
+                    except Exception:
+                        pass
+            if y is not None and (0.0 <= y <= self.table_h * 1.2):
+                return 1.0
+            return 0.0
+        if name in ("tilt_warning", "score", "ball_x", "ball_y", "ball_vx", "ball_vy"):
+            return 0.0
+        raise KeyError(name)
+
+    def pack_observation(self, raw: Dict[str, Any]) -> np.ndarray:
+        obs = np.empty((len(self.obs_features),), dtype=np.float32)
+        missing = []
+        for i, name in enumerate(self.obs_features):
+            try:
+                obs[i] = self.normalize_feature(name, self._resolve_raw(raw, name))
+            except Exception:
+                obs[i] = 0.0
+                missing.append(name)
+        if missing and not self._warn_once_done:
+            self._warn_once_done = True
+            print(f"[PinballEnv] Warning: missing features {missing}. Got keys: {list(raw.keys())}")
+        return obs
+
+    # -------------------- HTTP helpers --------------------
+    def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        r = requests.post(self.server_url + path, json=payload, timeout=2.5)
+        r.raise_for_status()
+        return r.json() if r.content else {}
+
+    def _get(self, path: str) -> Dict[str, Any]:
+        r = requests.get(self.server_url + path, timeout=2.5)
+        r.raise_for_status()
+        return r.json() if r.content else {}
+
+    # -------------------- Gym API --------------------
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        self._episode_steps = 0
+        self._done = False
+        self._last_score = 0.0
+        self._warn_once_done = False
+
+        self._post("/control", {"cmd": "new_ball"})
+
+        t0 = time.time()
+        raw = None
+        while time.time() - t0 < self.reset_timeout_s:
+            try:
+                state = self._get("/last_state")
+                if state and "raw" in state:
+                    raw = state["raw"]
+                    break
+            except Exception:
+                pass
+            time.sleep(0.02)
+
+        if raw is None:
+            raise RuntimeError("Timeout waiting for VPX state during reset().")
+
+        obs = self.pack_observation(raw)
+        self._last_obs = obs
+        self._last_score = float(self._resolve_raw(raw, "score"))
+        return obs, {"raw": raw}
+
+    def step(self, action):
+        if self._done:
+            raise RuntimeError("Call reset() before step() after episode end.")
+
+        self._post("/act", self._encode_action(action))
+        time.sleep(max(0.0, self.frame_skip * self.dt + self.step_wait_s))
+
+        state = self._get("/last_state")
+        if not state or "raw" not in state:
+            raise RuntimeError("No state available from bridge (/last_state).")
+        raw = state["raw"]
+
+        obs = self.pack_observation(raw)
+        score = float(self._resolve_raw(raw, "score"))
+        reward = score - self._last_score
+        self._last_score = score
+
+        on_pf = int(round(self._resolve_raw(raw, "on_playfield")))
+        terminated = (on_pf == 0)
+        truncated = False
+        self._done = terminated or truncated
+        self._episode_steps += 1
+
+        return obs, reward, terminated, truncated, {"raw": raw, "action_desc": self._action_desc}
 
     # -------------------- action encoding (with plunger) --------------------
     def _encode_action(self, action):
         if self.action_schema == "binary_flippers":
             a = np.asarray(action, dtype=np.int32).clip(0, 1)
-            left, right, nudge, plunger = int(a[0]), int(a[1]), int(a[2]), int(a[3])
+            left, right, nudge, plunger = a
             now = time.time()
             do_nudge = 0
             if nudge and (now - self._last_nudge_ts) >= self.nudge_cooldown:
                 self._last_nudge_ts = now
                 do_nudge = 1
             return {
-                "left": left,
-                "right": right,
+                "left": int(left),
+                "right": int(right),
                 "nudge": do_nudge,
-                "plunger": plunger,
+                "plunger": int(plunger),
                 "duration_s": self.frame_skip * self.dt,
             }
         else:
             a = np.asarray(action, dtype=np.float32)
-            left_f = float(np.clip(a[0], 0.0, 1.0))
-            right_f = float(np.clip(a[1], 0.0, 1.0))
-            nudge_imp = float(np.clip(a[2], -1.0, 1.0))
-            plunger_f = float(np.clip(a[3], 0.0, 1.0))
+            left_f, right_f, nudge_imp, plunger_f = a
             now = time.time()
             nudge_out = 0.0
             if abs(nudge_imp) > 1e-6 and (now - self._last_nudge_ts) >= self.nudge_cooldown:
                 self._last_nudge_ts = now
                 nudge_out = nudge_imp
             return {
-                "left_f": left_f,
-                "right_f": right_f,
+                "left_f": float(np.clip(left_f, 0, 1)),
+                "right_f": float(np.clip(right_f, 0, 1)),
                 "nudge_imp": nudge_out,
-                "plunger_f": plunger_f,
+                "plunger_f": float(np.clip(plunger_f, 0, 1)),
                 "duration_s": self.frame_skip * self.dt,
             }
+
+    def render(self):
+        return None
+
+    def close(self):
+        try:
+            self._post("/control", {"cmd": "end_episode"})
+        except Exception:
+            pass

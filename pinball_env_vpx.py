@@ -256,7 +256,7 @@ class PinballEnv(gym.Env):
                 pass
 
             # give VPX time to reset
-            time.sleep(5.0)
+            time.sleep(1.0)
 
             return obs, reward, True, False, {
                 "raw": raw,

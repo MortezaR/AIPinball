@@ -7,10 +7,6 @@ import requests
 
 
 class PinballEnv(gym.Env):
-    """
-    VPX-backed Gymnasium env (robust key handling).
-    - Now includes binary plunger support.
-    """
     metadata = {"render_modes": ["human", "rgb_array", None], "render_fps": 60}
 
     def __init__(
@@ -18,13 +14,10 @@ class PinballEnv(gym.Env):
         server_url: str = "http://127.0.0.1:5000",
         render_mode: Optional[str] = None,
         table_size: Tuple[float, float] = (500.0, 1000.0),
-        max_balls: int = 1,
         obs_features: Sequence[str] = (
             "ball_x", "ball_y", "ball_vx", "ball_vy", "ball_speed",
             "on_playfield", "score", "tilt_warning"
         ),
-        action_schema: str = "binary_flippers",
-        nudge_cooldown: float = 0.25,
         frame_skip: int = 1,
         dt: float = 1.0 / 60.0,
         seed: Optional[int] = None,
@@ -37,17 +30,13 @@ class PinballEnv(gym.Env):
         super().__init__()
         self.server_url = server_url.rstrip("/")
         if render_mode not in self.metadata["render_modes"]:
-            raise ValueError(f"render_mode must be one of {self.metadata['render_modes']}; got {render_mode}")
+            raise ValueError(
+                f"render_mode must be one of {self.metadata['render_modes']}; got {render_mode}"
+            )
         self.render_mode = render_mode
 
         self.table_w, self.table_h = float(table_size[0]), float(table_size[1])
-        self.max_balls = int(max_balls)
         self.obs_features = tuple(obs_features)
-        self.action_schema = action_schema
-        if self.action_schema not in ("binary_flippers", "continuous_flippers"):
-            raise ValueError("action_schema must be 'binary_flippers' or 'continuous_flippers'.")
-        self.nudge_cooldown = float(nudge_cooldown)
-        self._last_nudge_ts = -1e9
         self.frame_skip = int(frame_skip)
         self.dt = float(dt)
         self.step_wait_s = float(step_wait_s)
@@ -55,21 +44,23 @@ class PinballEnv(gym.Env):
 
         self.np_random, _ = gym.utils.seeding.np_random(seed)
 
-        self.feature_bounds = feature_bounds or self._default_feature_bounds(self.table_w, self.table_h, self.dt)
+        self.feature_bounds = feature_bounds or self._default_feature_bounds(
+            self.table_w, self.table_h, self.dt
+        )
         self._validate_feature_bounds(self.obs_features, self.feature_bounds)
 
-        self.observation_space = spaces.Box(low=-1.0, high=1.0, shape=(len(self.obs_features),), dtype=np.float32)
+        self.observation_space = spaces.Box(
+            low=-1.0,
+            high=1.0,
+            shape=(len(self.obs_features),),
+            dtype=np.float32,
+        )
 
-        # 🟩 Modified: Include binary plunger
-        if self.action_schema == "binary_flippers":
-            self.action_space = spaces.MultiBinary(4)  # [L, R, nudge, plunger]
-            self._action_desc = ("left_flipper", "right_flipper", "nudge", "plunger")
-        else:
-            low = np.array([0.0, 0.0, -1.0, 0.0], dtype=np.float32)
-            high = np.array([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
-            self.action_space = spaces.Box(low=low, high=high, dtype=np.float32)
-            self._action_desc = ("left_force", "right_force", "nudge_impulse", "plunger_force")
+        # action: left, right, nudge, plunger
+        self.action_space = spaces.MultiBinary(4)
+        self._action_desc = ("left_flipper", "right_flipper", "nudge", "plunger")
 
+        # aliases for raw VPX fields
         default_aliases = {
             "ball_x": ["ball_x", "x", "X", "BallX"],
             "ball_y": ["ball_y", "y", "Y", "BallY"],
@@ -80,9 +71,11 @@ class PinballEnv(gym.Env):
             "score": ["score", "Score", "POINTS"],
             "tilt_warning": ["tilt_warning", "tilt", "TiltWarning", "Tilt"],
         }
+
         if feature_aliases:
             for k, v in feature_aliases.items():
                 default_aliases[k] = v + default_aliases.get(k, [])
+
         self.feature_aliases = default_aliases
 
         self._episode_steps = 0
@@ -91,8 +84,10 @@ class PinballEnv(gym.Env):
         self._done = False
         self._warn_once_done = not verbose_missing_once
 
-    # -------------------- feature helpers --------------------
-    def _default_feature_bounds(self, w: float, h: float, dt: float) -> Dict[str, Tuple[float, float]]:
+    # ----------------------------- feature bounds -----------------------------
+    def _default_feature_bounds(
+        self, w: float, h: float, dt: float
+    ) -> Dict[str, Tuple[float, float]]:
         vmax = max(w, h) / dt
         return {
             "ball_x": (0.0, w),
@@ -118,7 +113,7 @@ class PinballEnv(gym.Env):
         x = (value - lo) / (hi - lo)
         return float(np.clip(x, 0.0, 1.0) * 2.0 - 1.0)
 
-    # -------------------- raw key resolution --------------------
+    # ----------------------------- raw resolution -----------------------------
     def _resolve_raw(self, raw: Dict[str, Any], name: str) -> float:
         for k in self.feature_aliases.get(name, [name]):
             if k in raw:
@@ -126,10 +121,12 @@ class PinballEnv(gym.Env):
                     return float(raw[k])
                 except Exception:
                     pass
+
         if name == "ball_speed":
             vx = self._resolve_raw(raw, "ball_vx")
             vy = self._resolve_raw(raw, "ball_vy")
             return float(np.hypot(vx, vy))
+
         if name == "on_playfield":
             y = None
             for k in self.feature_aliases.get("ball_y", ["ball_y"]):
@@ -142,8 +139,10 @@ class PinballEnv(gym.Env):
             if y is not None and (0.0 <= y <= self.table_h * 1.2):
                 return 1.0
             return 0.0
+
         if name in ("tilt_warning", "score", "ball_x", "ball_y", "ball_vx", "ball_vy"):
             return 0.0
+
         raise KeyError(name)
 
     def pack_observation(self, raw: Dict[str, Any]) -> np.ndarray:
@@ -157,10 +156,10 @@ class PinballEnv(gym.Env):
                 missing.append(name)
         if missing and not self._warn_once_done:
             self._warn_once_done = True
-            print(f"[PinballEnv] Warning: missing features {missing}. Got keys: {list(raw.keys())}")
+            print(f"[PinballEnv] Warning: missing features {missing}. Keys: {list(raw.keys())}")
         return obs
 
-    # -------------------- HTTP helpers --------------------
+    # ----------------------------- HTTP helpers -----------------------------
     def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         r = requests.post(self.server_url + path, json=payload, timeout=2.5)
         r.raise_for_status()
@@ -171,14 +170,15 @@ class PinballEnv(gym.Env):
         r.raise_for_status()
         return r.json() if r.content else {}
 
-    # -------------------- Gym API --------------------
+    # ----------------------------- Reset -----------------------------
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
-        self._episode_steps = 0
+        self._episode_steps = 0        # track steps
         self._done = False
         self._last_score = 0.0
         self._warn_once_done = False
 
+        # tell bridge/VPX to start a new ball
         self._post("/control", {"cmd": "new_ball"})
 
         t0 = time.time()
@@ -201,63 +201,94 @@ class PinballEnv(gym.Env):
         self._last_score = float(self._resolve_raw(raw, "score"))
         return obs, {"raw": raw}
 
+    # ----------------------------- Drain flag helper -----------------------------
+    def _get_drain_flag(self, raw: Dict[str, Any]) -> int:
+        """
+        Look for DrainGotHit / drain_got_hit / drain_hit in the raw dict.
+        Returns 1 if drain got hit, else 0.
+        """
+        val = (
+            raw.get("drain_got_hit")
+            or raw.get("DrainGotHit")
+            or raw.get("drain_hit")
+        )
+        if val is None:
+            return 0
+        try:
+            return int(round(float(val)))
+        except Exception:
+            return 0
+
+    # ----------------------------- Step -----------------------------
     def step(self, action):
         if self._done:
             raise RuntimeError("Call reset() before step() after episode end.")
 
+        # send action to bridge
         self._post("/act", self._encode_action(action))
         time.sleep(max(0.0, self.frame_skip * self.dt + self.step_wait_s))
 
+        # pull latest state
         state = self._get("/last_state")
         if not state or "raw" not in state:
             raise RuntimeError("No state available from bridge (/last_state).")
         raw = state["raw"]
 
         obs = self.pack_observation(raw)
+
         score = float(self._resolve_raw(raw, "score"))
-        reward = score - self._last_score
+        reward = score
         self._last_score = score
 
+        # 1) playfield heuristic
         on_pf = int(round(self._resolve_raw(raw, "on_playfield")))
         terminated = (on_pf == 0)
+
+        # 2) hard drain flag from VPX
+        drain = self._get_drain_flag(raw)
+        if drain == 1:
+            terminated = True
+            self._done = True
+
+            try:
+                self._post("/control", {"cmd": "end_episode"})
+            except Exception:
+                pass
+
+            # give VPX time to reset
+            time.sleep(5.0)
+
+            return obs, reward, True, False, {
+                "raw": raw,
+                "drain": 1,
+                "action_desc": self._action_desc,
+            }
+
         truncated = False
         self._done = terminated or truncated
         self._episode_steps += 1
 
-        return obs, reward, terminated, truncated, {"raw": raw, "action_desc": self._action_desc}
+        return obs, reward, terminated, truncated, {
+            "raw": raw,
+            "action_desc": self._action_desc,
+        }
 
-    # -------------------- action encoding (with plunger) --------------------
+    # ----------------------------- Action Encoding -----------------------------
     def _encode_action(self, action):
-        if self.action_schema == "binary_flippers":
-            a = np.asarray(action, dtype=np.int32).clip(0, 1)
-            left, right, nudge, plunger = a
-            now = time.time()
-            do_nudge = 0
-            if nudge and (now - self._last_nudge_ts) >= self.nudge_cooldown:
-                self._last_nudge_ts = now
-                do_nudge = 1
-            return {
-                "left": int(left),
-                "right": int(right),
-                "nudge": do_nudge,
-                "plunger": int(plunger),
-                "duration_s": self.frame_skip * self.dt,
-            }
-        else:
-            a = np.asarray(action, dtype=np.float32)
-            left_f, right_f, nudge_imp, plunger_f = a
-            now = time.time()
-            nudge_out = 0.0
-            if abs(nudge_imp) > 1e-6 and (now - self._last_nudge_ts) >= self.nudge_cooldown:
-                self._last_nudge_ts = now
-                nudge_out = nudge_imp
-            return {
-                "left_f": float(np.clip(left_f, 0, 1)),
-                "right_f": float(np.clip(right_f, 0, 1)),
-                "nudge_imp": nudge_out,
-                "plunger_f": float(np.clip(plunger_f, 0, 1)),
-                "duration_s": self.frame_skip * self.dt,
-            }
+        """
+        Expect action as length-4 iterable [left, right, nudge, plunger] of 0/1.
+        """
+        a = np.asarray(action, dtype=np.int32).clip(0, 1)
+        if a.shape != (4,):
+            raise ValueError(f"Expected action shape (4,), got {a.shape}")
+        left, right, nudge, plunger = a
+        return {
+            "left": int(left),
+            "right": int(right),
+            "nudge": int(nudge),
+            "plunger": int(plunger),
+            "duration_s": self.frame_skip * self.dt,
+        }
 
     def render(self):
         return None

@@ -1,4 +1,4 @@
-<# setup.ps1 — VPX + RL — use your newest Python (e.g., 3.14) #>
+<# setup.ps1 — VPX + RL — CUDA-ready environment #>
 
 param(
   [string]$VPXPath   = "C:\Visual Pinball\VPinballX.exe",
@@ -31,16 +31,22 @@ function Pip-Install {
 
   & $py -m pip install --upgrade pip wheel setuptools
 
+  # Base deps
   if (Test-Path ".\requirements.txt") {
+    Write-Host "Installing from requirements.txt ..."
     & $py -m pip install -r .\requirements.txt
   } else {
+    Write-Host "Installing base Python deps ..."
     & $py -m pip install flask requests numpy gymnasium
-    try {
-      & $py -m pip install "torch==2.9.0" --timeout 120
-    } catch {
-      Write-Host 'PyPI torch install failed — retrying from the PyTorch index (CPU wheels) ...'
-      & $py -m pip install "torch==2.9.0" --index-url https://download.pytorch.org/whl/cpu --timeout 120
-    }
+  }
+
+  # Try CUDA torch first
+  try {
+    Write-Host "Installing CUDA-enabled PyTorch (cu121) ..."
+    & $py -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 --timeout 600
+  } catch {
+    Write-Warning "CUDA PyTorch install failed; falling back to CPU-only torch ..."
+    & $py -m pip install torch --index-url https://download.pytorch.org/whl/cpu --timeout 600
   }
 }
 
@@ -60,22 +66,24 @@ function Write-Env {
   Write-Host 'Wrote .env'
 }
 
-Write-Host '=== VPX RL Setup (current Python) ==='
+Write-Host '=== VPX RL Setup (CUDA-enabled) ==='
 
 $pycmd = Find-Python
 New-VenvCurrent -PyCmd $pycmd
 Pip-Install
 
+# Write requirements.txt for reference
 if (-not (Test-Path ".\requirements.txt")) {
   $req = @(
     "flask",
     "requests",
     "numpy",
     "gymnasium",
-    "torch==2.9.0"
+    "torch",
+    "torchvision"
   )
   Set-Content -Path ".\requirements.txt" -Value $req -Encoding UTF8
 }
 
 Write-Env
-Write-Host 'Setup complete. Next: double-click run_all.ps1'
+Write-Host 'Setup complete. Next: run run_all.ps1'

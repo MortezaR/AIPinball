@@ -89,7 +89,6 @@ class PinballEnv(gym.Env):
 
     #----------------------------- Reset -----------------------------
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
-        print(f"this episode had {self._episode_steps} steps")
         super().reset()
         self._episode_steps = 0        # track steps
         self.old_score = 0
@@ -131,12 +130,18 @@ class PinballEnv(gym.Env):
             self._done = True
             time.sleep(1.0)
 
-            return obs, 0, terminated, truncated, info
+            return obs, -1000, terminated, truncated, info
         else:
             reward = score - self.old_score
             self.old_score = score
 
         self._done = terminated or truncated
+
+        #this is an action penalty so it doesn't take random actions
+        left, right = action
+        if(left == 1 or right == 1):
+            reward -= 0.1
+
 
 
         return obs, reward, terminated, truncated, info

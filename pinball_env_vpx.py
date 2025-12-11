@@ -139,8 +139,10 @@ class PinballEnv(gym.Env):
 
         #this is an action penalty so it doesn't take random actions
         left, right = action
-        if(left == 1 or right == 1):
-            reward -= 0.1
+        if (left == 1 or right == 1):
+            reward -= 0.8
+        if (left == 1 and right == 1):
+            reward -=0.4
 
 
 

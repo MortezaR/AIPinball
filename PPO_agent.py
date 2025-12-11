@@ -46,7 +46,7 @@ class RolloutMemory:
 class ActorNetwork(nn.Module):
 
     def __init__(self,num_actions_dim,input_dims,alpha,
-                 hidden_layer1_dim = 64,hidden_layer2_dim = 64, savefile_dir = 'tmp/ppo'):
+                 hidden_layer1_dim = 256,hidden_layer2_dim = 256, savefile_dir = 'tmp/ppo'):
         super().__init__()
 
         self.checkpoint_file = os.path.join(savefile_dir, 'actor_torch_ppo')
@@ -79,7 +79,7 @@ class ActorNetwork(nn.Module):
 
 class CriticNetwork(nn.Module):
     def __init__(self,input_dims,alpha,
-                 hidden_layer1_dim = 64,hidden_layer2_dim = 64, savefile_dir = 'tmp/ppo'):
+                 hidden_layer1_dim = 256,hidden_layer2_dim = 256, savefile_dir = 'tmp/ppo'):
         super().__init__()
 
         self.checkpoint_file = os.path.join(savefile_dir, 'critic_torch_ppo')

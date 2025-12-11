@@ -34,7 +34,7 @@ def train_ppo(
         input_dims=obs_dim,
         gamma=0.99,
         alpha=3e-4,
-        gae_lambda=0.95,
+        gae_lambda=0.97,
         policy_clip=0.2,
         batch_size=64,
         steps_before_update=steps_per_update,
@@ -131,6 +131,6 @@ if __name__ == "__main__":
         steps_per_update=2048,
         max_steps_per_episode=100000,
         save_every=20,
-        load_from=True,
+        load_from=None,
         log_dir="tmp/pinball_ppo",
     )
